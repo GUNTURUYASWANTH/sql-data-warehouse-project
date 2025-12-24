@@ -563,6 +563,7 @@ SELECT DISTINCT
     WHERE sls_sales != sls_quantity * sls_price
     or sls_sales IS NULL OR sls_quantity IS NULL OR sls_price IS NULL
     or sls_sales <=0 OR sls_quantity <=0 OR sls_price <=0 
+    ORDER BY sls_sales,sls_quantity, sls_price
 
 -- Rules for the above query :
 -- If Sales is Negative, Zero , Null derive it using Quanitty and Price
@@ -616,51 +617,465 @@ SELECT
                 OR sls_price <=0
              THEN sls_quantity * ABS(sls_price) 
             ELSE  sls_sales
-        END as sls_sales,
+        END as new_sls_sales,
         CASE 
             WHEN sls_price IS NULL 
                 OR sls_price <= 0
             THEN  ABS(sls_sales / NULLIF(sls_quantity,0))
             ELSE  sls_price
-        END
+        END as new_sls_price
     FROM datawarehouse.sales_details
     WHERE sls_sales != sls_quantity * sls_price
     or sls_sales IS NULL OR sls_quantity IS NULL OR sls_price IS NULL
     or sls_sales <=0 OR sls_quantity <=0 OR sls_price <=0 
-    ORDER BY old_sls_sales, sls_quantity, old_sls_price
+    ORDER BY sls_sales, sls_quantity, sls_price
+
+-- Practise it ------
 
 
+--- This query getting the crct result
 SELECT 
-    sls_sales               AS old_sls_sales,
+    sls_sales AS old_sls_sales,
     sls_quantity,
-    sls_price               AS old_sls_price,
-    /* New computed sls_sales */
+    sls_price AS old_sls_price,
     CASE 
         WHEN sls_sales IS NULL 
-          OR sls_quantity IS NULL 
+          OR sls_quantity IS NULL
           OR sls_price IS NULL
-          OR sls_sales <= 0 
-          OR sls_quantity <= 0 
+          OR sls_sales <= 0
+          OR sls_quantity <= 0
           OR sls_price <= 0
           OR sls_sales <> sls_quantity * ABS(sls_price)
-        THEN sls_quantity * ABS(sls_price)
+        THEN sls_quantity * ABS(
+               CASE 
+                 WHEN sls_price IS NULL OR sls_price <= 0
+                 THEN CAST(ABS(sls_sales / NULLIF(sls_quantity, 0)) as SIGNED)  -- fallback price
+                 ELSE CAST(sls_price as SIGNED)
+               END
+             )
         ELSE sls_sales
-    END AS new_sls_sales,
-    /* New computed sls_price */
-    CASE
-        WHEN sls_price IS NULL 
-          OR sls_price <= 0 
-        THEN ABS(sls_sales / NULLIF(sls_quantity, 0))
-        ELSE ABS(sls_price)
-    END AS new_sls_price
-
+    END AS sls_sales,
+        CASE 
+            WHEN sls_price IS NULL 
+                OR sls_price <= 0
+            THEN  CAST(ABS(sls_sales / NULLIF(sls_quantity,0)) as SIGNED)
+            ELSE  CAST(sls_price as SIGNED)
+        END as sls_price
 FROM datawarehouse.sales_details
-WHERE sls_sales <> sls_quantity * sls_price
-   OR sls_sales IS NULL 
-   OR sls_quantity IS NULL 
-   OR sls_price IS NULL
-   OR sls_sales <= 0 
-   OR sls_quantity <= 0 
-   OR sls_price <= 0
+WHERE sls_sales <> sls_quantity * ABS(sls_price)
+   OR sls_sales IS NULL OR sls_quantity IS NULL OR sls_price IS NULL
+   OR sls_sales <= 0 OR sls_quantity <= 0 OR sls_price <= 0
 ORDER BY sls_sales, sls_quantity, sls_price;
+
+------ Main query---------------
+select sls_ord_num ,
+    sls_prd_key ,
+    sls_cust_id ,
+        CASE 
+            WHEN sls_order_dt = 0 OR LENGTH(sls_order_dt)!=8 THEN NULL   
+            ELSE  CAST(CAST(sls_order_dt AS CHAR) AS DATE)
+        END AS sls_order_dt,
+        CASE 
+            WHEN sls_ship_dt = 0 OR LENGTH(sls_ship_dt) != 8 THEN NULL 
+            ELSE  CAST(CAST(sls_ship_dt AS CHAR) AS DATE)
+        END as sls_ship_dt ,
+        CASE 
+            WHEN sls_due_dt = 0 OR LENGTH(sls_due_dt) != 8 THEN NULL  
+            ELSE CAST(CAST(sls_due_dt as CHAR) AS DATE)
+        END AS sls_due_dt ,
+        CASE 
+            WHEN sls_sales IS NULL 
+            OR sls_quantity IS NULL
+            OR sls_price IS NULL
+            OR sls_sales <= 0
+            OR sls_quantity <= 0
+            OR sls_price <= 0
+            OR sls_sales <> sls_quantity * ABS(sls_price)
+            THEN sls_quantity * ABS(
+                CASE 
+                    WHEN sls_price IS NULL OR sls_price <= 0
+                    THEN CAST(ABS(sls_sales / NULLIF(sls_quantity, 0)) as SIGNED)  -- fallback price
+                    ELSE CAST(sls_price as SIGNED)
+                END
+                )
+            ELSE sls_sales
+        END AS sls_sales,
+        sls_quantity,
+            CASE 
+                WHEN sls_price IS NULL 
+                    OR sls_price <= 0
+                THEN  CAST(ABS(sls_sales / NULLIF(sls_quantity,0)) as SIGNED)
+                ELSE  CAST(sls_price as SIGNED)
+            END as sls_price
+        from datawarehouse.sales_details
+        WHERE sls_sales <> sls_quantity * ABS(sls_price)
+        OR sls_sales IS NULL OR sls_quantity IS NULL OR sls_price IS NULL
+        OR sls_sales <= 0 OR sls_quantity <= 0 OR sls_price <= 0
+
+
+-------------- Silver layer DDL creation ---------------------------
+
+-- We need to check it with the table of bronze layer to silver layer
+
+-- Before while creation of table sls_order_dt, sls_ship_dt ,sls_due_dt  they are in integer varaible 
+-- we changed them into date
+
+use silver
+
+DROP TABLE IF EXISTS silver.sales_details;
+create table if not exists sales_details(
+    sls_ord_num VARCHAR(50),
+    sls_prd_key VARCHAR(50),
+    sls_cust_id int,
+    sls_order_dt DATE,
+    sls_ship_dt DATE,
+    sls_due_dt DATE,
+    sls_sales int,
+    sls_quantity int,
+    sls_price int,
+    dwh_create_date DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+
+
+-- Inserting data into silver.sales_details table
+
+INSERT INTO silver.sales_details(
+    sls_ord_num ,
+    sls_prd_key ,
+    sls_cust_id ,
+    sls_order_dt ,
+    sls_ship_dt ,
+    sls_due_dt ,
+    sls_sales ,
+    sls_quantity,
+    sls_price
+)
+select sls_ord_num ,
+    sls_prd_key ,
+    sls_cust_id ,
+        CASE 
+            WHEN sls_order_dt = 0 OR LENGTH(sls_order_dt)!=8 THEN NULL   
+            ELSE  CAST(CAST(sls_order_dt AS CHAR) AS DATE)
+        END AS sls_order_dt,
+        CASE 
+            WHEN sls_ship_dt = 0 OR LENGTH(sls_ship_dt) != 8 THEN NULL 
+            ELSE  CAST(CAST(sls_ship_dt AS CHAR) AS DATE)
+        END as sls_ship_dt ,
+        CASE 
+            WHEN sls_due_dt = 0 OR LENGTH(sls_due_dt) != 8 THEN NULL  
+            ELSE CAST(CAST(sls_due_dt as CHAR) AS DATE)
+        END AS sls_due_dt ,
+        CASE 
+            WHEN sls_sales IS NULL 
+            OR sls_quantity IS NULL
+            OR sls_price IS NULL
+            OR sls_sales <= 0
+            OR sls_quantity <= 0
+            OR sls_price <= 0
+            OR sls_sales <> sls_quantity * ABS(sls_price)
+            THEN sls_quantity * ABS(
+                CASE 
+                    WHEN sls_price IS NULL OR sls_price <= 0
+                    THEN CAST(ABS(sls_sales / NULLIF(sls_quantity, 0)) as SIGNED)  -- fallback price
+                    ELSE CAST(sls_price as SIGNED)
+                END
+                )
+            ELSE sls_sales
+        END AS sls_sales,
+        sls_quantity,
+            CASE 
+                WHEN sls_price IS NULL 
+                    OR sls_price <= 0
+                THEN  CAST(ABS(sls_sales / NULLIF(sls_quantity,0)) as SIGNED)
+                ELSE  CAST(sls_price as SIGNED)
+            END as sls_price
+        from datawarehouse.sales_details
+        WHERE sls_sales <> sls_quantity * ABS(sls_price)
+        OR sls_sales IS NULL OR sls_quantity IS NULL OR sls_price IS NULL
+        OR sls_sales <= 0 OR sls_quantity <= 0 OR sls_price <= 0
+
+SELECT * FROM silver.sales_details
+
+
+
+show TABLES
+
+-------------------- For silver.erp_cust_az12 ---------------------
+
+SELECT * FROM datawarehouse.erp_cust_az12
+
+SELECT * from datawarehouse.crm_cust_info
+
+-- As these both tables are connected 
+-- We need to combine both tables by erp_cust_az12.cid = crm_cust_info.cst_key
+
+SELECT 
+        SUBSTR(cid,9,LENGTH(cid)) as cid,
+        bdate,
+        gen 
+        FROM datawarehouse.erp_cust_az12
+
+-- Now we need to check it for the invalid cid_key
+
+SELECT 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END as cid,
+        bdate,
+        gen 
+        FROM datawarehouse.erp_cust_az12
+        
+
+-- Now we will check it with invalid cid_key
+
+SELECT 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END as cid,
+        bdate,
+        gen 
+        FROM datawarehouse.erp_cust_az12
+    WHERE 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END  NOT IN (SELECT DISTINCT cst_key FROM silver.crm_cust_info)
+
+
+----- Now we will check for dates ----------
+
+SELECT DISTINCT
+        bdate
+        FROM datawarehouse.erp_cust_az12
+    WHERE bdate < '1924-01-01' OR bdate > CURRENT_DATE()
+
+-- As some dates are exceeding the current date eg (9999-09-13) we need to make them into null
+
+SELECT 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END as cid,
+        CASE 
+            WHEN bdate > CURRENT_DATE() THEN NULL 
+            ELSE  bdate
+        END as bdate,
+        gen 
+        FROM datawarehouse.erp_cust_az12
+
+
+-- Now we will check for the gender column
+-- Data standardization & consistency
+
+SELECT DISTINCT gen from datawarehouse.erp_cust_az12
+
+SELECT DISTINCT
+    gen AS raw_gen,
+    CASE 
+        WHEN gen IS NULL THEN 'n/a'
+        WHEN LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(gen, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) IN ('f','female') THEN 'Female'
+        WHEN LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(gen, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) IN ('m','male')   THEN 'Male'
+        ELSE 'n/a'
+    END AS normalized_gen
+FROM datawarehouse.erp_cust_az12;
+
+
+-- Here we used to remove Extra spaces , Hidden characters, Mixed case, Non-breaking spaces , Nulls
+-- \r -> To return
+-- \t -> To remove tabs
+-- \n -> To remove newlines
+-- char(160) -> Removes non-breaking spaces (common in imported data)
+
+-- If we use without them then it returns always n/a as we mentioned above
+
+-- Inserting into silver.erp_cust_az12
+
+TRUNCATE TABLE silver.erp_cust_az12
+
+INSERT INTO silver.erp_cust_az12
+    (cid,
+    bdate,
+    gen)
+    (SELECT 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END as cid,
+        CASE 
+            WHEN bdate > CURRENT_DATE() THEN NULL 
+            ELSE  bdate
+        END as bdate,
+        CASE 
+            WHEN gen IS NULL THEN 'n/a'
+            WHEN LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(gen, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) IN ('f','female') THEN 'Female'
+            WHEN LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(gen, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) IN ('m','male')   THEN 'Male'
+            ELSE 'n/a'
+        END AS gen
+    FROM datawarehouse.erp_cust_az12)
+
+-- We will recheck it for invalid errors by follwing the rules where we used in
+
+-- Now we need to check it for the invalid cid_key
+
+SELECT 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END as cid,
+        bdate,
+        gen 
+        FROM silver.erp_cust_az12
+        
+
+-- Now we will check it with invalid cid_key
+
+SELECT 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END as cid,
+        bdate,
+        gen 
+        FROM silver.erp_cust_az12
+    WHERE 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTR(cid,4,LENGTH(cid))  
+            ELSE  cid
+        END  NOT IN (SELECT DISTINCT cst_key FROM silver.crm_cust_info)
+
+
+----- Now we will check for dates ----------
+
+SELECT DISTINCT
+        bdate
+        FROM silver.erp_cust_az12
+    WHERE bdate < '1924-01-01' OR bdate > CURRENT_DATE()
+
+SELECT DISTINCT gen
+    FROM silver.erp_cust_az12
+
+SELECT * from silver.erp_cust_az12
+
+
+-------------------------------------------------------------------------
+
+-- Now we will check for erp_loc_a101 table
+
+SELECT * FROM datawarehouse.erp_loc_a101
+
+SELECT * from silver.crm_cust_info
+
+--- In datawarehouse.erp_loc_a101 we need to remove '-' for to equal with cst_key in silver.crm_cust_info
+
+SELECT
+        REPLACE(cid,'-','') as cid,
+        cntry
+    FROM datawarehouse.erp_loc_a101
+
+
+-- We will check for inalid cid from silver.crm_cust_info
+
+SELECT
+        REPLACE(cid,'-','') as cid,
+        cntry
+    FROM datawarehouse.erp_loc_a101
+    WHERE REPLACE(cid,'-','') NOT IN (SELECT cst_key FROM silver.crm_cust_info)
+
+--- Important point here if we use cid on where while comparison it gives every thing
+--- But if we give REPLACE(cid,'-','') this it will give correct answer
+
+-- Data standardization & Consistency
+
+SELECT DISTINCT cntry from datawarehouse.erp_loc_a101
+
+-- As there are null, empty string, abbrevations
+
+SELECT
+  REPLACE(cid, '-', '') AS cid,
+  CASE
+    WHEN UPPER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(cntry, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) = 'DE'
+      THEN 'Germany'
+    WHEN UPPER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(cntry, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) IN ('US', 'USA')
+      THEN 'United States'
+    WHEN cntry IS NULL
+      OR UPPER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(cntry, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) = ''
+      THEN 'n/a'
+    ELSE TRIM(cntry)  -- keep original (trimmed) when not mapped
+  END AS cntry
+FROM datawarehouse.erp_loc_a101;
+
+/*
+If your ERP or CRM data was exported from Excel or a legacy system, these characters often appear because:
+    Users press Enter in a cell → adds \n.
+    Copy-paste from Word → adds \r.
+    Tab-delimited files → adds \t.
+*/
+
+
+-- Inserting the data into silver.erp_loc_a101
+
+
+INSERT into silver.erp_loc_a101
+    (cid,
+    cntry)
+    SELECT
+  REPLACE(cid, '-', '') AS cid,
+  CASE
+    WHEN UPPER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(cntry, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) = 'DE'
+      THEN 'Germany'
+    WHEN UPPER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(cntry, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) IN ('US', 'USA')
+      THEN 'United States'
+    WHEN cntry IS NULL
+      OR UPPER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(cntry, '\r',''), '\n',''), '\t',''), CHAR(160), ''))) = ''
+      THEN 'n/a'
+    ELSE TRIM(cntry)  -- keep original (trimmed) when not mapped
+  END AS cntry
+FROM datawarehouse.erp_loc_a101;
+
+SELECT * from silver.erp_loc_a101
+
+--- Now we will double check for invalid errors
+
+SELECT
+        REPLACE(cid,'-','') as cid,
+        cntry
+    FROM silver.erp_loc_a101
+    WHERE REPLACE(cid,'-','') NOT IN (SELECT cst_key FROM silver.crm_cust_info)
+
+SELECT DISTINCT cntry from silver.erp_loc_a101
+
+
+---------------------------------------------------------
+
+-- Now for datawarehouse.px_cat_g1v2
+
+SELECT * from datawarehouse.px_cat_g1v2
+
+RENAME TABLE datawarehouse.px_cat_g1v2 to datawarehouse.erp_px_cat_g1v2
+
+SELECT * from datawarehouse.erp_px_cat_g1v2
+
+SELECT * from silver.prd_info
+
+-- Check for unwanted spaces
+
+SELECT * from datawarehouse.erp_px_cat_g1v2
+    WHERE id != TRIM(id) OR subcat != TRIM(subcat) or maintenance != TRIM(maintenance)
+
+SELECT DISTINCT cat FROM datawarehouse.erp_px_cat_g1v2
+
+SELECT DISTINCT subcat FROM datawarehouse.erp_px_cat_g1v2
+
+SELECT DISTINCT maintenance FROM datawarehouse.erp_px_cat_g1v2
+-- As our output showing two 'Yes' which is not a good sign
+
+TRUNCATE TABLE silver.erp_px_cat_g1v2
+
+INSERT INTO silver.erp_px_cat_g1v2 (id, cat, subcat , maintenance)
+    SELECT id, cat ,subcat ,maintenance FROM datawarehouse.erp_px_cat_g1v2
+
+SELECT * FROM silver.erp_px_cat_g1v2
+
 
